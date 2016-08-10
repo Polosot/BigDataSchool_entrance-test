@@ -1,0 +1,335 @@
+---
+title: "Kyivstar Big Data School"
+author: "Sarana Maksym"
+date: "6 февраля 2016 г."
+output: html_document
+---
+
+# 1. Загрузка данных
+
+Устанавливаем Seed для воспроизводимости данных, грузим обучающую выборку:
+```{r}
+set.seed(23450)
+# Путь к файлам
+data_path = "Data//"
+# Строки в факторы пока не конвертируем
+data <- read.table(paste0(data_path, "Train.csv"), sep=";", dec=",", header = T, stringsAsFactors = F, na.strings = "NA")
+# Смотрим, что получилось
+str(data)
+```
+Итак, видно что много столбцов с данными похожими на числовые, в числовой формат не сконвертировались. Значит, там встречаются не подходящие к числовому формату данные
+
+# 2. Чистка данных
+
+К сожалению, нет информации с назначением столбцов. 
+По порядку:
+
+1. Идентификатор клиента есть смысл оставить в строковом виде. Он скорее всего не повторяется, поэтому от конвертации в фактор мы ничего не выиграем
+
+2. V1,V2 и V6 - очевидно, столбцы с датами. Формат, очевидно, не американский - день, месяц и год. Конвертируем:
+```{r}
+for(c in c("V1","V2","V6"))
+  data[,c] <- as.Date(data[,c], "%d.%m.%Y")
+```
+
+3. Поскольку на выходе требуется получить вероятность того, что абонент – женщина, есть смысл поле "пол" конвертировать не в фактор, а в число: 0 - мужчина, 1 - женщина:
+```{r}
+data$Gender = ifelse(data$Gender == "Female", 1, ifelse(data$Gender == "Male", 0, NA))
+```
+
+По остальным столбцам давайте посмотрим, сколько значений помечено NA, сколько конвертируется/не конвертируется в число, а также что из себя представляют неконвертируемые и конвертируемые данные. Для этого напишем небольшую функцию (FUN - это функция, которая будет пытаться конвертировать значения):
+
+```{r warning=FALSE}
+testColumn <- function(col, FUN) {
+      numcol <- FUN(col)
+      NAs <- sum(is.na(col))
+      NotConv <- sum(is.na(numcol)) - NAs
+      cat(paste("NAs:", NAs, paste0("(",round(100 * NAs / nrow(data), 2),"%)"), 
+                  "Not numeric:", NotConv, paste0("(",round(100 * NotConv / nrow(data), 2),"%)\n")))
+      cat("Numeric values:\n")
+      print(summary(numcol))
+      cat("Non-numeric values:\n")
+      print(head(col[is.na(numcol) & !is.na(col)], 20))  
+}
+
+
+for(c in 8:33) {
+  col <- data[,c]
+  
+  if(is.character(col)) {
+      message(paste("Column:", colnames(data)[c]))
+      testColumn(col, function(x) as.numeric(sub(",", ".", x)))
+  }
+}
+```
+Итак, можно сделать некоторые выводы:
+
+1. Столбцы с V11 по V32 содержат по 11 NA значений в исходных данных (кроме V12, V25 и V30). Можно предположить, что речь идет об одних и тех же строках:
+
+```{r}
+data[is.na(data$V23),12:34]
+```
+
+2. Cтолбцы c V9 по V32 содержат, наряду с числовыми данными, даты в строковом формате с запятой в качестве разделителя. Причем эти даты как из дальнего прошлого (например, 1933 год), так и из будущего (например, 2029 год), причем этот разброс характерен практических для всех замусоренных столбцов, но доля таких записей невелика (до 0.56% выборки). Если предположить, что числовые данные также отражают даты, то скорее всего это была бы одна из принятых систем хранения дат/времени - кол-во дней, прошедших с начала 1900 или 1970 года, и числовое значение было бы порядка 42000-43000 в первом случае и 16000-17000 во втором (для текущих дат). Даже если данные замусорены, медиана должна бы быть близкой к этому. Легко видеть, что это не так - медианы сконвертированных значений совершенно не похожи на числовое представление дат. Если бы это было представление времени - то временная часть присутствовала бы и в строковых значениях. Можно сделать вывод, что никакой смысловой нагрузки в этих датах нет (а скорее всего это искусственный мусор для усложнения задания :) ) Ввиду небольшого количества таких значений, ими можно пренебречь. Пока конвертируем в числа (что не конвертируется - будет NA):
+```{r warning=FALSE}
+for(c in 10:33) 
+  if(is.character(data[,c]))
+    data[,c] <- as.numeric(sub(",", ".", data[,c]))
+```
+
+3. Столбцы V7 и V8, по-видимому, содержат данные в шестнадцатиричной системе исчисления по 4 байта. Tак же в глаза бросается, что в данных полях есть повторяющиеся значения. Возможно что это какие-то коды. Открытый вопрос - стоит ли их воспринимать как непрерывные или как категориальные данные.
+
+Для проверки предположения о категориальности давайте посмотрим, сколько уникальных значений содержит каждое поле:
+```{r}
+length(unique(data$V7))
+length(unique(data$V8))
+```
+Довольно немного по сравнению с объемом выборки (`r nrow(data)`) - особенно во втором случае. Также можно сделать вывод, что природа этих двух полей различна.
+
+Теперь попробуем сконвертировать в десятичное число:
+```{r warning=FALSE}
+testColumn(data$V7, function(x) as.numeric(paste0("0x", x)))
+testColumn(data$V8, function(x) as.numeric(paste0("0x", x)))
+```
+Столбец V8 конвертируется хорошо, а в V7 есть записанные в экспоненциальной форме числа. У некоторых из них порядок составляет +67, в то время как у сконвертированных чисел максимум - 4.408e+12. 
+
+Возможные предположения:
+
+- Поля целочисленные, а строки с экспоненциальной записью - мусор
+
+- шестнадцатиричная запись содержит вещественные числа в стандарте  IEEE754, а строки с экспоненциальной записью - по какой-то причине нераспознанные числа
+
+- это категориальные данные, и конкретные значения для нас не важны 
+
+Склоняюсь пока воспринимать эти два поля как категориальные. Конвертируем их в факторы:
+```{r}
+data$V7 <- factor(data$V7)
+data$V8 <- factor(data$V8)
+```
+
+Все эти же действия необходимо будет провести также с тестовой выборкой. Поэтому переносим все действия в функцию:
+```{r}
+cleanData <- function(d, isTrain = F) {
+  # Конвертирование дат
+  for(c in c("V1","V2","V6"))
+    d[,c] <- as.Date(d[,c], "%d.%m.%Y")
+  # Факторизация полей в шестнадцатиричном виде
+  d$V7 <- factor(d$V7)
+  d$V8 <- factor(d$V8)
+  # Конвертация числовых данных
+  for(c in 10:33) 
+    if(is.character(d[,c]))
+      d[,c] <- as.numeric(sub(",", ".", d[,c]))
+  # Для обучающей выборки: пол - в числовом виде
+  if(isTrain) 
+    d$Gender = ifelse(d$Gender == "Female", 1, ifelse(d$Gender == "Male", 0, NA))
+  
+  return(d)
+}
+```
+
+Можно повторно загрузить обучающую выборку, а так же загрузить тестовую и убедиться, что все ок:
+```{r warning=FALSE}
+data <- cleanData(read.table(paste0(data_path, "Train.csv"), sep=";", dec=",", header = T, stringsAsFactors = F, na.strings = "NA"), TRUE)
+
+str(data)
+
+test <- cleanData(read.table(paste0(data_path, "Test.csv"), sep=";", dec=",", header = T, stringsAsFactors = F, na.strings = "NA"), FALSE)
+
+str(test)
+```
+Количество NA-значений в тестовой выборке:
+```{r}
+apply(test, 2, function(x) sum(is.na(x)))
+
+```
+
+# 4. Разведочный анализ
+Для начала убедимся, что среди идентификаторов нет дубликатов и каждая строка соответсвует отдельному абоненту:
+```{r}
+length(data$subs_id) - length(unique(data$subs_id))
+```
+V1 и V2 похожи на начало и конец какого-то периода.
+```{r}
+max(data$V1 - data$V2)
+min(data$V1 - data$V2)
+```
+Очевидно, это период данных - до одного месяца. В таком случае не исключено, что какой-то из показателей пропорционален количеству дней и по этой причине записи могут быть не соизмеримы между собой. Проверим корреляцию между количеством дней и нашими данными:
+```{r warning=FALSE}
+V1V2 <- as.numeric(data$V1 - data$V2)
+apply(data[4:33], 2, function(x) cor(as.numeric(x), V1V2, use = "pairwise.complete.obs"))
+```
+Очевидно, такой ситуации не наблюдается.
+Таким образом, поля начала и конца периода V1 и V2, а так же поле с датой V6 (похоже на дату начала обслуживания или что-то подобное) по-видимому, можно сразу исключить - маловероятно, чтобы они как-то определяли пол абонента.
+
+Что касается остальных данных - остается разве что проверить, нет ли сильной корелляции между полом и каким-то из признаков:
+```{r}
+apply(data[4:33], 2, function(x) cor(as.numeric(x), data$Gender, use = "pairwise.complete.obs"))
+```
+Такого нет. Пытаться анализировать поля далее, не понимая их природы, по-видимому смысла нет. Переходим к подбору модели.
+
+# 5. Подбор модели
+Подключаем необходимые библиотеки
+```{r warning=FALSE}
+library(caret)
+library(randomForest)
+library(ROCR)
+library(e1071)
+```
+
+Делим обучающую выборку на две части - для обучения и тестирования модели в ходе подбора:
+```{r}
+inTrain <- createDataPartition(y = data$Gender, p = 0.65, list=FALSE)
+dataTraining <- data[inTrain,]
+dataTesting <- data[-inTrain,]
+```
+Следующая функция строит и анализирует модели по нескольким алгоритмам. На вход подается функция, которая определяет набор атрибутов и отфильтровывает NA-значения. Далее результат мержится с исходной тестовой подвыборкой, и для записей, по которым нет прогноза по причине NA-значений, берется вероятность 0.5.
+```{r warning=FALSE}
+testModel <- function(FUN) {
+    dTraining <- FUN(dataTraining)
+    dTesting <- FUN(dataTesting)  
+    
+    #############################################################################    
+    #Test Random Forest
+    rf <- randomForest(Gender ~ ., dTraining[-1])
+    predictions <- predict(rf, dTesting[-1])  
+    
+    merged <- merge(dataTesting, data.frame(subs_id = dTesting$subs_id, prob = predictions),
+                    by = "subs_id", all.x = TRUE)[c("subs_id","prob","Gender")]
+    merged$prob <- ifelse(is.na(merged$prob), 0.5, merged$prob)
+    
+    pred <- prediction(merged$prob, merged$Gender)
+    
+    cat("1) Test Random Forest\n")
+    cat(paste0("AUC=", round(attributes(performance(pred, "auc"))$y.values[[1]], 4), "\n"))
+    cat(paste0("RMSD=", round(sqrt(sum((merged$prob - merged$Gender)^2)/nrow(merged)), 4), "\n"))  
+    
+    #############################################################################    
+    #Test Naive Bayes (interval)
+#    nb <- naiveBayes(I(factor(Gender)) ~ ., dTraining[-1])
+#    predictions <- predict(nb, dTesting[-1])
+#    cat("2) Test Naive Bayes (factor)\n")
+
+    
+#    print(confusionMatrix(predictions, dTesting$Gender))
+    
+    #############################################################################    
+    #Test Logistic regression 
+    gl <- glm(Gender ~ ., dTraining[-1], family="binomial")
+    predictions <- predict(gl, dTesting[-1], type="response")
+    
+    merged <- merge(dataTesting, data.frame(subs_id = dTesting$subs_id, prob = predictions),
+                    by = "subs_id", all.x = TRUE)[c("subs_id","prob","Gender")]
+    merged$prob <- ifelse(is.na(merged$prob), 0.5, merged$prob)
+    
+    pred <- prediction(merged$prob, merged$Gender)
+    
+    cat("3) Test Logistic regression (interval)\n")
+    cat(paste0("AUC=", round(attributes(performance(pred, "auc"))$y.values[[1]], 4), "\n"))
+    cat(paste0("RMSD=", round(sqrt(sum((merged$prob - merged$Gender)^2)/nrow(merged)), 4), "\n")) 
+}
+
+```
+Сначала уберем из анализа поля, в которых было наибольшее число пустых значений, а также даты:
+```{r}
+getFeatures1 <- function(x) {
+  newdata <- x[,!(names(x) %in% c("V1", "V2", "V6", "V7", "V12", "V25", "V30"))]
+  
+  
+  # Убираем строки с пустыми значениями
+  return(newdata[!apply(newdata, 1, anyNA), ])
+}
+
+testModel(getFeatures1)
+```
+Далее будем добавлять убранные поля. Смысл в том, что при добавлении полей с большим количеством пустых значений такие записи исключаются. Поэтому с одной стороны в модель привносится дополнительная информация (добавленное поле), с другой - сокращается объем выборки.
+
+Добавим V30:
+```{r}
+getFeatures2 <- function(x) {
+  newdata <- x[,!(names(x) %in% c("V1", "V2", "V6", "V7", "V12", "V25"))]
+  
+  
+  # Убираем строки с пустыми значениями
+  return(newdata[!apply(newdata, 1, anyNA), ])
+}
+
+testModel(getFeatures2)
+```
+
+Добавим V25:
+```{r}
+getFeatures3 <- function(x) {
+  newdata <- x[,!(names(x) %in% c("V1", "V2", "V6", "V7", "V12", "V30"))]
+  
+  
+  # Убираем строки с пустыми значениями
+  return(newdata[!apply(newdata, 1, anyNA), ])
+}
+
+testModel(getFeatures3)
+```
+
+Добавим V12:
+```{r}
+getFeatures4 <- function(x) {
+  newdata <- x[,!(names(x) %in% c("V1", "V2", "V6", "V7", "V25", "V30"))]
+  
+  
+  # Убираем строки с пустыми значениями
+  return(newdata[!apply(newdata, 1, anyNA), ])
+}
+
+testModel(getFeatures4)
+```
+
+Добавим V7 в числовом виде:
+```{r}
+getFeatures5 <- function(x) {
+  newdata <- x[,!(names(x) %in% c("V1", "V2", "V6", "V7", "V12", "V25", "V30"))]
+  newdata$V7 <- as.numeric(paste0("0x", x$V7))
+  
+  # Убираем строки с пустыми значениями
+  return(newdata[!apply(newdata, 1, anyNA), ])
+}
+
+testModel(getFeatures5)
+```
+
+Добавим V12, V25, V30:
+```{r}
+getFeatures6 <- function(x) {
+  newdata <- x[,!(names(x) %in% c("V1", "V2", "V6", "V7"))]
+  
+  
+  # Убираем строки с пустыми значениями
+  return(newdata[!apply(newdata, 1, anyNA), ])
+}
+
+testModel(getFeatures6)
+```
+Выбираем вариант Random Forest с добавленным полем V25.
+# 6. Прогнозирование значений тестовой выборки
+
+Теперь строим Random Forest по полной обучающей выборке и прогнозируем значения тестовой выборки:
+```{r}
+    dTraining <- getFeatures3(data)
+    dTesting <- getFeatures3(test)  
+    
+
+    rf <- randomForest(Gender ~ ., dTraining[-1])
+    predictions <- predict(rf, dTesting[-1])
+    
+    result <- data.frame(subs_id = dTesting$subs_id, prob = predictions)
+    
+    str(result)
+
+```
+Однако часть записей из тестовой выборки потеряна по причине пропущенных данных (отфильтрована в функции getFeatures). Восстановим недостающие записи, указав вероятность 0.5, и запишем выходной файл:
+
+```{r}
+    merged <- merge(test, result, by = "subs_id", all.x = TRUE)[c("subs_id","prob")]
+    merged$prob <- ifelse(is.na(merged$prob), 0.5, merged$prob)
+    write.table(merged, "MaksymSarana.csv", dec = ",", sep=";", quote = FALSE, row.names = FALSE)
+```
+
